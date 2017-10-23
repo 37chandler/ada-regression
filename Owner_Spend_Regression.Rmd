@@ -1,30 +1,181 @@
 ---
-title: "OwnerRegression"
-author: "John Chandler"
-date: "October 18, 2017"
+title: "Owner Spend Regression"
 output: html_document
 ---
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
+
 ```
 
-## R Markdown
+In this workbook we'll build a model for owner spend in the month of 
+August 2015. (The Wedge did a remodel project in February of 2016, 
+so we want to be careful using time after that for our analysis.)
 
-This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+Let's start by reading in a file of spend by owner and department by 
+month and year. Feel free to substitute your file in for the 
+one I'm providing--you should have something like this built for
+part 2 of the Wedge project.
 
-When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
 
-```{r cars}
-summary(cars)
+```{r input, cache=TRUE, echo=FALSE, include=FALSE}
+# Caching keeps this from running every time you Knit.
+d <- data.table::fread("20161107_owner_month_dept.txt",header=T)
 ```
 
-## Including Plots
+```{r head, results="asis",echo=FALSE}
+knitr::kable(head(d),caption="Head of the Owner Data")
 
-You can also embed plots, for example:
-
-```{r pressure, echo=FALSE}
-plot(pressure)
 ```
 
-Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+You should be pretty familiar with those fields except for "Segment". 
+That field is built based on some rules that we built back in 2015
+to split owners into various categories. Let me know if you'd like to hear
+more about the process. 
+
+As always, let's do some descriptive statistics. Here's what
+`describe` has to say for us. We're going to cut down the
+data to `segment != 'light' & year == 2015` just to make
+the code run snappier.
+
+``` {r desc, echo=F, warning=F}
+d <- subset(d,segment != 'light' & year == 2015)
+Hmisc::describe(d)
+```
+
+There are some *very* large spends in there. So that our regression
+model isn't unduly influenced by these non-individual owners, 
+let's drop anyone with a department-level spend of more than $1,000
+in a month. This isn't perfect, and if we worked for the Wedge there
+would be better ways to clean this data, but it will get us started.
+``` {r echo=F}
+questionable_spenders <- unique(d$owner[d$spend > 1000])
+
+d <- d[!(d$owner %in% questionable_spenders),]
+```
+
+
+## Building Regression Data
+We'd like to build a regression model that has
+spend in August 2015 as the response variable. Our
+explantory variables will be:
+* Spend in July
+* Spend in June
+* Number of departments shopped in previous seven months
+* Indicator variables for July shopping in Produce, 
+Packaged Grocery, and Supplements. 
+
+There are a lot of ways to build up this data set, but since
+we're easing our way back into R, I'll do it in a slow-but-clear
+way so we can see what's happening. Once we get `dplyr` (next week)
+we'll see some faster ways.
+
+``` {r data_build, cache=T}
+reg.d <- data.frame(owner=unique(d$owner[d$month==8 & d$year==2015]), # get owners
+                    august=0, # placeholders
+                    july=0, 
+                    june=0,
+                    depts=0,
+                    produce=0,
+                    pck_groc=0,
+                    supplements=0)
+
+for (i in 1:nrow(reg.d)) {
+  this.owner <- reg.d$owner[i]
+  this.data <- d[d$owner==this.owner,]
+  
+  reg.d$august[i] <- sum(this.data$spend[this.data$month==8])
+  reg.d$july[i] <- sum(this.data$spend[this.data$month==7])
+  reg.d$june[i] <- sum(this.data$spend[this.data$month==6])
+  reg.d$depts[i] <- length(unique(this.data$dept_no[this.data$month < 8]))
+  reg.d$produce[i] <- ifelse("PRODUCE" %in% unique(this.data$department[this.data$month==7]),1,0)
+
+  reg.d$pck_groc[i] <- ifelse("PACKAGED GROCERY" %in% unique(this.data$department[this.data$month==7]),1,0)
+
+  reg.d$supplements[i] <- ifelse("SUPPLEMENTS" %in% unique(this.data$department[this.data$month==7]),1,0)
+
+}
+
+```
+
+## Plotting the data
+It's always a good idea to look at the data before we start 
+doing some modeling. Let's look at the various columns of `reg.d` 
+versus the response variable, `august`. 
+
+```{r plots, echo=FALSE}
+plot(reg.d$july,reg.d$august,xlab="july",ylab="august")
+plot(reg.d$june,reg.d$august,xlab="june",ylab="august")
+
+boxplot(reg.d$august ~ reg.d$depts,xlab="depts",ylab="august")
+
+boxplot(reg.d$august ~ reg.d$produce,xlab="produce",ylab="august")
+boxplot(reg.d$august ~ reg.d$pck_groc,xlab="packaged grocery",ylab="august")
+boxplot(reg.d$august ~ reg.d$supplements,xlab="supplements",ylab="august")
+
+```
+
+In the future when we make charts like this we can make them look
+much better (particularly using `ggplot`). We haven't covered that
+yet, though, so I'll just make one for you to show you how I'd 
+prepare these in a more publication-worthy way.
+```{r gg_plot}
+library(ggplot2)
+library(scales)
+
+p <- ggplot(reg.d,
+            aes(x=july,y=august)) + 
+  geom_point(alpha=0.2) + 
+  labs(x="July Spend",y="August Spend") +
+  theme_bw() +
+  scale_x_continuous(label=dollar) + 
+  scale_y_continuous(label=dollar) + 
+  stat_smooth(method="lm",col="red") + 
+  stat_smooth(col="blue",se=F)
+
+print(p)
+
+```
+
+## Building a Model
+Building models in R are pretty easy. Let's create one and look
+at the summary-level information
+
+``` {r model_1}
+lm.1 <- lm(august ~ july + june + depts + 
+             produce + pck_groc + supplements,
+           data=reg.d)
+
+summary(lm.1)
+```
+
+The $R^2=0.7$, which is pretty respectable and our residual 
+standard error is $122, which, again, seems pretty solid until 
+we remember that the mean August spend is $193, so we're missing
+by a pretty decent amount. 
+
+Spend some time thinking about what these coefficients mean. What
+would the estimate be for someone who spent $100 in June and July, 
+shopped 10 departments, and shopped PRODUCE and SUPPLEMENTS in July?
+You can write some R code here to answer the question.
+
+## Analyzing Residuals
+Let's add the residuals of the model to our regression data. 
+``` {r add_resid} 
+reg.d$resids <- residuals(lm.1)
+Hmisc::describe(reg.d$resids)
+
+knitr::kable(subset(reg.d,resids < -500))
+knitr::kable(subset(reg.d,resids > 800))
+
+```
+
+How would you describe what we're seeing in this large and small 
+residuals? What could you do to try to improve our model fit?
+
+## Future Work
+Here are some ways to extend this work if we've got more time:
+* Whatever you came up with immediately above! :-)
+* Extending to a rolling time horizon rather than having August 2015
+as the only response variable.
+* Exploring additional covariates. 
